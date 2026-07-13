@@ -1,0 +1,7 @@
+# EN: never commit secrets or local artifacts. | ZH: 绝不提交密钥或本地产物。
+.env
+.sentinel/
+__pycache__/
+*.pyc
+.venv/
+catalog.json
