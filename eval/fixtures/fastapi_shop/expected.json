@@ -1,0 +1,41 @@
+{
+  "repo": "fastapi_shop",
+  "note": "Ground truth — the metrics a good observability engineer would want. | 标准答案：一个好的可观测性工程师想要的指标。",
+  "metrics": [
+    {
+      "id": "app.cold_start",
+      "signal": "latency",
+      "why": "startup time"
+    },
+    {
+      "id": "api.request.duration",
+      "signal": "latency",
+      "why": "RED.Duration"
+    },
+    {
+      "id": "api.errors",
+      "signal": "errors",
+      "why": "RED.Errors"
+    },
+    {
+      "id": "dep.call.duration",
+      "signal": "latency",
+      "why": "external payment call"
+    },
+    {
+      "id": "dep.errors",
+      "signal": "errors",
+      "why": "external payment failures"
+    },
+    {
+      "id": "cache.operations",
+      "signal": "traffic",
+      "why": "redis cache.get hit/miss"
+    },
+    {
+      "id": "db.query.duration",
+      "signal": "latency",
+      "why": "sqlite query latency"
+    }
+  ]
+}

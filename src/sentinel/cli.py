@@ -36,6 +36,7 @@ from sentinel.engines.apply import Applier, ApplyError
 from sentinel.engines.alerting import AlertingDesigner
 from sentinel.engines.discovery import DiscoveryEngine
 from sentinel.engines.export import ObservabilityExporter
+from sentinel.evaluation import aggregate, evaluate_dir
 from sentinel.engines.instrument import InstrumentEngine
 from sentinel.engines.query_builder import QueryBuilder
 from sentinel.llm.client import PROVIDERS, LLMClient, LLMConfig, PrivacyMode
@@ -556,6 +557,66 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    """EN: Evaluate discovery quality vs hand-labeled ground truth (precision /
+        recall / F1 + per-signal recall). --llm adds an ablation column showing
+        the LLM's recall lift. | ZH: 对照人工标准答案评估发现质量（P/R/F1 + 按信号
+        召回）。--llm 加一列消融，显示 LLM 带来的召回提升。"""
+    fixtures = Path(args.fixtures)
+    if not fixtures.exists():
+        console.print(f"[red]fixtures not found | fixtures 不存在:[/red] {fixtures}")
+        return 1
+    static = evaluate_dir(fixtures)
+    if not static:
+        console.print(f"[yellow]no fixtures (need subdirs with expected.json) | "
+                      f"无 fixture:[/yellow] {fixtures}")
+        return 0
+
+    llm_by_repo = {}
+    if args.llm:
+        llm = _build_llm(args.provider, args.privacy)
+        if llm.available:
+            llm_by_repo = {r.repo: r for r in evaluate_dir(fixtures, llm=llm)}
+        else:
+            console.print(f"[dim]ablation skipped — LLM off: {llm.why_unavailable()}[/dim]")
+
+    table = Table(title="Discovery quality | 发现质量评估", show_lines=True)
+    table.add_column("Repo | 仓库", style="bold")
+    table.add_column("Precision", no_wrap=True)
+    table.add_column("Recall", no_wrap=True)
+    table.add_column("F1", no_wrap=True)
+    table.add_column("Missed | 漏检")
+    if llm_by_repo:
+        table.add_column("+LLM Recall", no_wrap=True)
+    for r in static:
+        row = [r.repo, f"{r.precision:.2f}", f"{r.recall:.2f}", f"{r.f1:.2f}",
+               ", ".join(r.missed) or "-"]
+        if llm_by_repo:
+            lr = llm_by_repo.get(r.repo)
+            if lr:
+                d = lr.recall - r.recall
+                row.append(f"{lr.recall:.2f} ([green]{d:+.2f}[/green])")
+            else:
+                row.append("-")
+        table.add_row(*row)
+    console.print(table)
+
+    agg = aggregate(static)
+    line = (f"[bold]macro avg | 宏平均:[/bold] "
+            f"P={agg['precision']:.2f}  R={agg['recall']:.2f}  F1={agg['f1']:.2f}")
+    if llm_by_repo:
+        agg_llm = aggregate(list(llm_by_repo.values()))
+        line += (f"   ·   [green]+LLM R={agg_llm['recall']:.2f} "
+                 f"(lift {agg_llm['recall'] - agg['recall']:+.2f})[/green]")
+    console.print(line)
+
+    # EN: per-signal recall of the first fixture (illustrative). | ZH: 首个 fixture 的按信号召回（示例）。
+    if static[0].per_signal_recall:
+        sig = "  ".join(f"{k}={v:.2f}" for k, v in static[0].per_signal_recall.items())
+        console.print(f"[dim]{static[0].repo} per-signal recall | 按信号召回: {sig}[/dim]")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sentinel",
@@ -663,6 +724,18 @@ def build_parser() -> argparse.ArgumentParser:
     db.add_argument("--datasource-uid", default="prometheus",
                     help="prometheus datasource uid for file export | 文件导出用的数据源 uid")
     db.set_defaults(func=cmd_dashboard)
+
+    ev = sub.add_parser("eval",
+                        help="evaluate discovery quality vs ground truth | 对照标准答案评估发现质量")
+    ev.add_argument("--fixtures", default="eval/fixtures",
+                    help="fixtures dir (subdirs with expected.json) | fixtures 目录")
+    ev.add_argument("--llm", action="store_true",
+                    help="ablation: also run with LLM and show recall lift | 消融：加跑 LLM 看召回提升")
+    ev.add_argument("--provider", default="openai", choices=sorted(PROVIDERS),
+                    help="LLM provider for the ablation | 消融用的 Provider")
+    ev.add_argument("--privacy", default="external-llm", choices=[m.value for m in PrivacyMode],
+                    help="privacy tier for the ablation | 消融用的隐私档")
+    ev.set_defaults(func=cmd_eval)
     return parser
 
 
