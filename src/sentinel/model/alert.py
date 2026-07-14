@@ -41,6 +41,10 @@ class ThresholdRule(BaseModel):
     unit: str = ""            # EN: ms | % | "" | ZH: 单位
     duration: str = "5m"      # EN: must persist this long (for:) | ZH: 需持续多久
     severity: Severity
+    # EN: a human-tuned threshold; merge keeps `pinned` rules and never overwrites
+    #     them on regeneration. | ZH: 人工调过的阈值；合并时保留 `pinned` 规则，
+    #     重新生成绝不覆盖它。
+    pinned: bool = False
 
     @property
     def condition(self) -> str:

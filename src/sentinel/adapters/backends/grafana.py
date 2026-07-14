@@ -98,6 +98,18 @@ class GrafanaAlertingClient:
             return any(cp.get("name") == name for cp in cps)
         return False
 
+    def list_contact_points(self) -> list[str]:
+        """EN: Names of all configured contact points (for UI pickers).
+        ZH: 所有已配置联络点的名字（供 UI 下拉选择）。"""
+        cps = self._request("GET", "/api/v1/provisioning/contact-points")
+        names: list[str] = []
+        if isinstance(cps, list):
+            for cp in cps:
+                name = cp.get("name")
+                if name and name not in names:
+                    names.append(name)
+        return names
+
     def existing_rule_titles(self) -> set[str]:
         """EN: Titles of already-provisioned alert rules (for idempotency).
         ZH: 已存在的告警规则标题（用于幂等）。"""
@@ -115,6 +127,29 @@ class GrafanaAlertingClient:
         # EN: X-Disable-Provenance lets users still edit the rule in the UI.
         # ZH: X-Disable-Provenance 让用户之后仍能在 UI 里编辑该规则。
         self._request("POST", "/api/v1/provisioning/alert-rules", rule,
+                      extra_headers={"X-Disable-Provenance": "true"})
+
+    def list_sentinel_rules(self) -> list[dict]:
+        """EN: All alert rules this tool created (label source=sentinel), as
+            [{uid, title, metric}]. Used to reconcile/prune obsolete rules.
+        ZH: 本工具建的全部告警规则（标签 source=sentinel），形式 [{uid,title,metric}]。
+            用于对账/清理废弃规则。"""
+        rules = self._request("GET", "/api/v1/provisioning/alert-rules")
+        out: list[dict] = []
+        if isinstance(rules, list):
+            for r in rules:
+                labels = r.get("labels") or {}
+                if labels.get("source") == "sentinel":
+                    out.append({
+                        "uid": r.get("uid", ""),
+                        "title": r.get("title", ""),
+                        "metric": labels.get("metric", ""),
+                    })
+        return out
+
+    def delete_alert_rule(self, uid: str) -> None:
+        """EN: Delete a provisioned alert rule by uid. | ZH: 按 uid 删除一条 provisioned 告警规则。"""
+        self._request("DELETE", f"/api/v1/provisioning/alert-rules/{uid}",
                       extra_headers={"X-Disable-Provenance": "true"})
 
 
@@ -153,7 +188,8 @@ def build_grafana_rules(
             "noDataState": "OK",       # EN: no traffic -> not firing | ZH: 无流量 -> 不触发
             "execErrState": "Error",
             "isPaused": False,
-            "labels": {"severity": r.severity.value.lower(), "source": "sentinel"},
+            "labels": {"severity": r.severity.value.lower(), "source": "sentinel",
+                       "metric": policy.metric_id},
             "annotations": {"summary": f"{policy.metric_id}: {r.condition}"},
             "notification_settings": {"receiver": contact_point},
             "data": [
