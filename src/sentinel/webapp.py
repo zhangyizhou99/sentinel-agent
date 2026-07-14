@@ -125,6 +125,21 @@ def run_query(repo: str, backend_name: str, window: str, lookback: str):
     return "\n\n".join(f"-- [{q.metric_id}]  ({q.sampling_note})\n{q.query}" for q in qs)
 
 
+def run_export(repo: str, backend_name: str, out: str) -> str:
+    """EN: Write feature-grouped observability files into the project (as-code).
+    ZH: 把按 feature 分组的可观测性文件写进项目（即代码）。"""
+    if not repo or not Path(repo).exists():
+        return f"❌ **repo not found | 仓库不存在:** `{repo}`"
+    from sentinel.engines.export import ObservabilityExporter
+    out_dir = out.strip() or str(Path(repo) / ".sentinel")
+    res = ObservabilityExporter(backend=backend_name).export(_static_catalog(repo), out_dir)
+    if not res.features:
+        return "⚠️ 无指标可导出 | no metrics to export"
+    feats = "\n".join(f"- `{f}`: {c} metrics" for f, c in sorted(res.features.items()))
+    return (f"✅ **导出 {len(res.features)} 个 feature、{res.total_files} 个文件** → "
+            f"`{res.out_dir}`\n\n{feats}")
+
+
 def _grafana_creds(repo: str):
     """EN: Load (base_url, token) from the repo's .env. | ZH: 从仓库 .env 读 (地址, token)。"""
     try:
@@ -275,6 +290,19 @@ def build_ui() -> gr.Blocks:
                 btn_query = gr.Button("📊 Generate queries | 生成查询", variant="primary", scale=1)
             queries = gr.Code(label="Backend queries | 后端查询", language="sql")
 
+            gr.Markdown("### 📁 Export to project (observability-as-code) | 生成到项目")
+            gr.Markdown(
+                "*按模块分组写出 `.sentinel/<feature>/{alerts.rules.yml, queries, metrics.json}` "
+                "— 可进 git、可 PR 评审 | grouped files, version-controllable*"
+            )
+            with gr.Row():
+                export_out = gr.Textbox(
+                    label="Output dir (default <repo>/.sentinel) | 输出目录", scale=3,
+                )
+                btn_export = gr.Button("📁 Export to project | 生成到项目",
+                                       variant="stop", scale=1)
+            export_status = gr.Markdown()
+
         with gr.Tab("🚨 Alerts | 告警"):
             btn_alerts = gr.Button("🚨 Design alerts | 设计告警", variant="primary")
             gr.Markdown("*阈值为建议，待人审 | thresholds are suggestions for review*")
@@ -302,6 +330,7 @@ def build_ui() -> gr.Blocks:
         btn_instrument.click(run_instrument, [repo, provider, privacy], [code])
         btn_apply.click(run_apply, [repo, provider, privacy, branch], [diff, apply_note])
         btn_query.click(run_query, [repo, backend, window, lookback], [queries])
+        btn_export.click(run_export, [repo, backend, export_out], [export_status])
         btn_alerts.click(run_alerts, [repo], [alerts])
         btn_deploy.click(run_deploy_alerts, [repo, contact_point], [deploy_status])
         btn_load_cp.click(load_contact_points, [repo], [contact_point, deploy_status])

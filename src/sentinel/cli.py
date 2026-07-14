@@ -34,6 +34,7 @@ from sentinel.adapters.backends.grafana import (
 from sentinel.engines.apply import Applier, ApplyError
 from sentinel.engines.alerting import AlertingDesigner
 from sentinel.engines.discovery import DiscoveryEngine
+from sentinel.engines.export import ObservabilityExporter
 from sentinel.engines.instrument import InstrumentEngine
 from sentinel.engines.query_builder import QueryBuilder
 from sentinel.llm.client import PROVIDERS, LLMClient, LLMConfig, PrivacyMode
@@ -468,6 +469,34 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    """EN: Write feature-grouped observability files (alerts + queries + metrics)
+        into the project as version-controllable, PR-reviewable config.
+    ZH: 把按 feature 分组的可观测性文件（告警+查询+指标）写进项目，作为可版本化、
+        可 PR 评审的配置。"""
+    repo = Path(args.repo_path)
+    if not repo.exists():
+        console.print(f"[red]repo not found | 仓库不存在:[/red] {repo}")
+        return 1
+    catalog = DiscoveryEngine(scanners=[PythonScanner(cache=None)]).run(repo)
+    out = Path(args.out) if args.out else repo / ".sentinel"
+    result = ObservabilityExporter(backend=args.backend).export(catalog, out)
+    if not result.features:
+        console.print("[yellow]no metrics to export | 无指标可导出[/yellow]")
+        return 0
+    table = Table(title="Exported | 已导出（可观测性即代码）", show_lines=False)
+    table.add_column("Feature | 模块", style="bold")
+    table.add_column("Metrics | 指标", no_wrap=True)
+    for feat, count in sorted(result.features.items()):
+        table.add_row(feat, str(count))
+    console.print(table)
+    console.print(
+        f"[green]wrote {result.total_files} file(s) | 已写入 {result.total_files} 个文件:[/green] "
+        f"{result.out_dir}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sentinel",
@@ -551,6 +580,15 @@ def build_parser() -> argparse.ArgumentParser:
     fb.add_argument("--privacy", default="air-gapped", choices=[m.value for m in PrivacyMode],
                     help="privacy tier (embedding not used here) | 隐私档")
     fb.set_defaults(func=cmd_feedback)
+
+    ex = sub.add_parser("export",
+                        help="write feature-grouped observability files into the project | 按 feature 把可观测性文件写进项目")
+    ex.add_argument("repo_path", help="path to the repository | 仓库路径")
+    ex.add_argument("--out", default="",
+                    help="output dir (default <repo>/.sentinel) | 输出目录（默认 <repo>/.sentinel）")
+    ex.add_argument("--backend", default="prometheus", choices=["prometheus", "kusto"],
+                    help="query backend for the emitted queries | 导出查询用的后端")
+    ex.set_defaults(func=cmd_export)
     return parser
 
 
