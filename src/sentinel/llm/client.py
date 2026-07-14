@@ -124,6 +124,25 @@ class LLMClient:
         )
         return resp.choices[0].message.content or ""
 
+    def chat(self, messages: list, tools: Optional[list] = None):
+        """EN: Multi-turn chat with optional tool/function calling. Returns the raw
+            assistant message (may carry `.tool_calls`). Powers the co-pilot.
+        ZH: 多轮对话，可选工具/函数调用。返回原始 assistant 消息（可能带 `.tool_calls`）。
+            对话副驾的底座。"""
+        if not self.available:
+            raise RuntimeError(f"LLM unavailable | LLM 不可用: {self._init_error}")
+        kwargs: dict = {
+            "model": self._model(),
+            "temperature": self.config.temperature,
+            "messages": messages,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        resp = self._client.chat.completions.create(**kwargs)  # type: ignore[union-attr]
+        return resp.choices[0].message
+
+
     # -- internals | 内部实现 ----------------------------------------------
 
     def _try_init(self) -> None:

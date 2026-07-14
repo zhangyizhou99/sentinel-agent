@@ -275,6 +275,29 @@ def run_deploy_dashboard(repo: str) -> str:
     return f"✅ **仪表盘已部署（{n} 面板）** → {base_url.rstrip('/')}{url}"
 
 
+def run_copilot(user_text: str, history: list, state, provider: str, privacy: str):
+    """EN: One co-pilot turn: LLM plans + calls Sentinel's tools (destructive ops
+        pause for confirmation). | ZH: 副驾一轮：LLM 规划并调用 Sentinel 工具（破坏性
+        操作暂停等确认）。"""
+    if not (user_text or "").strip():
+        return history, state, ""
+    from sentinel.engines.copilot import new_state, respond
+    from sentinel.llm.client import LLMClient, LLMConfig, PrivacyMode
+    llm = LLMClient(LLMConfig(provider=provider, privacy_mode=PrivacyMode(privacy)))
+    if not llm.available:
+        reply = (f"❌ LLM 不可用 | unavailable: {llm.why_unavailable()}\n\n"
+                 "请选 **provider=openai**（或 deepseek）+ **privacy=external-llm**，"
+                 "并在 `.env` 配好 key。")
+        return history + [(user_text, reply)], state, ""
+    if state is None:
+        state = new_state()
+    try:
+        reply, state = respond(user_text, state, llm)
+    except Exception as e:
+        reply = f"❌ {type(e).__name__}: {e}"
+    return history + [(user_text, reply)], state, ""
+
+
 def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Sentinel", theme=gr.themes.Soft()) as demo:
         gr.Markdown(
@@ -290,7 +313,21 @@ def build_ui() -> gr.Blocks:
                                   value=PrivacyMode.air_gapped.value,
                                   label="Privacy | 隐私档", scale=2)
 
-        with gr.Tab("🔍 Discover | 发现"):
+        with gr.Tab("� Co-pilot | 对话副驾"):
+            gr.Markdown(
+                "*用自然语言让副驾规划并调用工具（破坏性操作会先请你确认）。"
+                "需 **provider=openai/deepseek + privacy=external-llm** | natural-language agent*"
+            )
+            chatbot = gr.Chatbot(label="Sentinel Co-pilot", height=380)
+            copilot_state = gr.State(None)
+            with gr.Row():
+                msg_in = gr.Textbox(
+                    placeholder="例如：给 ../sentinel-sample-app 发现指标并设计告警",
+                    show_label=False, scale=4,
+                )
+                btn_send = gr.Button("发送 | Send", variant="primary", scale=1)
+
+        with gr.Tab("�🔍 Discover | 发现"):
             btn_discover = gr.Button("🔍 Discover | 发现", variant="primary")
             summary = gr.Markdown()
             table = gr.Dataframe(headers=_HEADERS, label="Metrics Catalog | 指标清单",
@@ -367,6 +404,11 @@ def build_ui() -> gr.Blocks:
         btn_load_cp.click(load_contact_points, [repo], [contact_point, deploy_status])
         btn_emit.click(run_emit_prometheus, [repo], [prom_yaml])
         btn_dashboard.click(run_deploy_dashboard, [repo], [dashboard_status])
+
+        _copilot_inputs = [msg_in, chatbot, copilot_state, provider, privacy]
+        _copilot_outputs = [chatbot, copilot_state, msg_in]
+        btn_send.click(run_copilot, _copilot_inputs, _copilot_outputs)
+        msg_in.submit(run_copilot, _copilot_inputs, _copilot_outputs)
     return demo
 
 
