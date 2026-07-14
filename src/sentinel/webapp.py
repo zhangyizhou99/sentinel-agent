@@ -16,7 +16,7 @@ import gradio as gr
 from sentinel.adapters.scanners.cache import ScanCache
 from sentinel.adapters.scanners.python_scanner import PythonScanner
 from sentinel.adapters.backends.kusto import KustoBackend
-from sentinel.adapters.backends.prometheus import PrometheusBackend
+from sentinel.adapters.backends.prometheus import PrometheusBackend, to_prometheus_yaml
 from sentinel.engines.apply import Applier, ApplyError
 from sentinel.engines.alerting import AlertingDesigner
 from sentinel.engines.discovery import DiscoveryEngine
@@ -125,6 +125,39 @@ def run_query(repo: str, backend_name: str, window: str, lookback: str):
     return "\n\n".join(f"-- [{q.metric_id}]  ({q.sampling_note})\n{q.query}" for q in qs)
 
 
+def _grafana_creds(repo: str):
+    """EN: Load (base_url, token) from the repo's .env. | ZH: 从仓库 .env 读 (地址, token)。"""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(Path(repo) / ".env")
+    except ImportError:
+        pass
+    import os
+    return os.getenv("GRAFANA_URL", ""), os.getenv("GRAFANA_TOKEN", "")
+
+
+def load_contact_points(repo: str):
+    """EN: Fetch existing Grafana contact points to fill the dropdown — no manual
+        typing. | ZH: 拉取 Grafana 已有联络点填下拉——不用手填。"""
+    if not repo or not Path(repo).exists():
+        return gr.update(choices=[]), f"❌ repo not found | 仓库不存在: `{repo}`"
+    base_url, token = _grafana_creds(repo)
+    if not base_url or not token:
+        return gr.update(choices=[]), (
+            "❌ 缺 **GRAFANA_URL / GRAFANA_TOKEN**（放仓库 `.env`）"
+            " | missing in the repo's .env"
+        )
+    from sentinel.adapters.backends.grafana import GrafanaAlertingClient, GrafanaError
+    try:
+        names = GrafanaAlertingClient(base_url, token).list_contact_points()
+    except GrafanaError as e:
+        return gr.update(choices=[]), f"❌ Grafana API 错误 | error: {e}"
+    if not names:
+        return gr.update(choices=[]), "⚠️ Grafana 里没有联络点 | no contact points found"
+    return (gr.update(choices=names, value=names[0]),
+            f"✅ 加载了 {len(names)} 个联络点，选一个后点部署 | loaded {len(names)}")
+
+
 def run_alerts(repo: str):
     """EN: D1 — design thresholds + Sev + routing. | ZH: D1 —— 设计阈值+Sev+路由。"""
     if not repo or not Path(repo).exists():
@@ -135,6 +168,70 @@ def run_alerts(repo: str):
             rows.append([p.metric_id, r.condition, r.severity.value,
                          ", ".join(p.routing.get(r.severity, []))])
     return rows
+
+
+def run_emit_prometheus(repo: str) -> str:
+    """EN: Render a Prometheus alerting_rules.yml for the catalog.
+    ZH: 为清单渲染 Prometheus alerting_rules.yml。"""
+    if not repo or not Path(repo).exists():
+        return f"# repo not found | 仓库不存在: {repo}"
+    policies = AlertingDesigner().design(_static_catalog(repo))
+    backend = PrometheusBackend()
+    rule_dicts: list = []
+    for p in policies:
+        rule_dicts.extend(backend.render_alert_rule(p))
+    if not rule_dicts:
+        return "# no rules | 无规则"
+    return to_prometheus_yaml(rule_dicts)
+
+
+def run_deploy_alerts(repo: str, contact_point: str) -> str:
+    """EN: L3 — push Grafana-managed alert rules via the Provisioning API, wired
+        to an existing contact point. Reads GRAFANA_URL/GRAFANA_TOKEN from the
+        repo's .env. | ZH: L3 —— 经 Provisioning API 把 Grafana-managed 告警规则
+        推上去并绑定已有联络点。从仓库 .env 读 GRAFANA_URL/GRAFANA_TOKEN。"""
+    if not repo or not Path(repo).exists():
+        return f"❌ **repo not found | 仓库不存在:** `{repo}`"
+    if not (contact_point or "").strip():
+        return "❌ 请先选/填 Grafana 联络点名字 | pick a Grafana contact point"
+
+    base_url, token = _grafana_creds(repo)
+    if not base_url or not token:
+        return ("❌ 缺 **GRAFANA_URL / GRAFANA_TOKEN**（放仓库 `.env`，token 是密钥）\n\n"
+                "missing GRAFANA_URL / GRAFANA_TOKEN in the repo's .env")
+
+    from sentinel.adapters.backends.grafana import (
+        GrafanaAlertingClient, GrafanaError, build_grafana_rules,
+    )
+    cp = contact_point.strip()
+    policies = AlertingDesigner().design(_static_catalog(repo))
+    if not policies:
+        return "⚠️ 无指标可告警 | no metrics to alert on"
+
+    client = GrafanaAlertingClient(base_url, token)
+    try:
+        if not client.contact_point_exists(cp):
+            return f"❌ 联络点不存在 | contact point not found: **{cp}**"
+        prom_uid = client.prometheus_datasource_uid()
+        folder_uid = client.ensure_folder("Sentinel")
+        existing = client.existing_rule_titles()
+    except GrafanaError as e:
+        return f"❌ Grafana API 错误 | error: {e}"
+
+    created, skipped = [], []
+    for p in policies:
+        for rule in build_grafana_rules(p, prom_uid, folder_uid, cp):
+            if rule["title"] in existing:
+                skipped.append(rule["title"])
+                continue
+            try:
+                client.create_alert_rule(rule)
+                created.append(rule["title"])
+            except GrafanaError as e:
+                return f"❌ 失败 | failed: {rule['title']} → {e}"
+    lines = "\n".join(f"- ✅ {t}" for t in created) or "(全部已存在 | all already present)"
+    return (f"✅ **部署 {len(created)} 条**，跳过 {len(skipped)} 条已存在 → 联络点 **{cp}**\n\n"
+            f"{lines}")
 
 
 def build_ui() -> gr.Blocks:
@@ -184,11 +281,31 @@ def build_ui() -> gr.Blocks:
             alerts = gr.Dataframe(headers=_ALERT_HEADERS, label="Alert policies | 告警策略",
                                   wrap=True, interactive=False)
 
+            gr.Markdown("### 🚀 Deploy to Grafana (L3) | 一键部署到 Grafana")
+            gr.Markdown(
+                "*需在仓库 `.env` 配 `GRAFANA_URL` + `GRAFANA_TOKEN`（服务账号 token）"
+                "| set GRAFANA_URL + GRAFANA_TOKEN in the repo's .env*"
+            )
+            with gr.Row():
+                contact_point = gr.Dropdown(
+                    choices=[], label="Grafana contact point | 联络点（从 Grafana 拉取）",
+                    allow_custom_value=True, scale=2,
+                )
+                btn_load_cp = gr.Button("🔄 加载联络点 | Load", scale=1)
+                btn_deploy = gr.Button("🚀 Deploy to Grafana | 部署", variant="stop", scale=1)
+            deploy_status = gr.Markdown()
+            btn_emit = gr.Button("⬇️ Export alerting_rules.yml | 导出 Prometheus 规则",
+                                 variant="secondary")
+            prom_yaml = gr.Code(label="Prometheus alerting_rules.yml", language="yaml")
+
         btn_discover.click(run_discover, [repo, provider, privacy], [table, summary])
         btn_instrument.click(run_instrument, [repo, provider, privacy], [code])
         btn_apply.click(run_apply, [repo, provider, privacy, branch], [diff, apply_note])
         btn_query.click(run_query, [repo, backend, window, lookback], [queries])
         btn_alerts.click(run_alerts, [repo], [alerts])
+        btn_deploy.click(run_deploy_alerts, [repo, contact_point], [deploy_status])
+        btn_load_cp.click(load_contact_points, [repo], [contact_point, deploy_status])
+        btn_emit.click(run_emit_prometheus, [repo], [prom_yaml])
     return demo
 
 

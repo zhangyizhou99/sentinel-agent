@@ -115,9 +115,37 @@ def cmd_discover(args: argparse.Namespace) -> int:
     # ZH: 给扫描器接上可选的磁盘缓存。
     cache = None if args.no_cache else ScanCache(scan_cache_path(repo))
     llm = _build_llm(args.provider, args.privacy)
-    engine = DiscoveryEngine(scanners=[PythonScanner(cache=cache)], llm=llm, lang=args.lang)
+
+    # EN: optional persistent memory: incremental index + learn from feedback.
+    # ZH: 可选持久记忆：增量索引 + 从反馈学习。
+    memory = None
+    if getattr(args, "memory", False):
+        from sentinel.memory.manager import MemoryManager
+        memory = MemoryManager(repo, privacy=args.privacy)
+        engine = DiscoveryEngine(
+            scanners=[PythonScanner(cache=cache)], llm=llm, lang=args.lang,
+            retriever=memory.retriever(),
+        )
+    else:
+        engine = DiscoveryEngine(
+            scanners=[PythonScanner(cache=cache)], llm=llm, lang=args.lang,
+        )
 
     catalog = engine.run(repo)
+
+    if memory is not None:
+        # EN: suppress previously-rejected metrics, then log this run.
+        # ZH: 先抑制历史被拒指标，再记录本次运行。
+        catalog, suppressed = memory.apply_feedback(catalog)
+        memory.record_run(catalog)
+        memory.consolidate()
+        memory.close()
+        if suppressed:
+            console.print(
+                f"[dim]memory: suppressed {suppressed} previously-rejected "
+                f"metric(s) | 记忆：抑制了 {suppressed} 个历史被拒指标[/dim]"
+            )
+
     _render(catalog, llm)
 
     if args.output:
@@ -230,6 +258,32 @@ def cmd_alerts(args: argparse.Namespace) -> int:
     if not policies:
         console.print("[yellow]no metrics to alert on | 无指标可告警[/yellow]")
         return 0
+
+    # EN: optional maintainable state: merge with saved policies (keep pinned
+    #     thresholds), report the diff, persist. | ZH: 可选可维护状态：与已存策略
+    #     合并（保留 pinned 阈值），报告 diff 并落盘。
+    if getattr(args, "state", None):
+        from sentinel.engines.alert_state import AlertPolicyStore
+        store = AlertPolicyStore(args.state)
+        diff = store.merge(policies)
+        if getattr(args, "pin", None):
+            ok = store.pin(args.pin)
+            console.print(
+                f"[green]pinned | 已固定:[/green] {args.pin}" if ok
+                else f"[yellow]metric not found to pin | 未找到可固定的指标:[/yellow] {args.pin}"
+            )
+        store.save()
+        policies = store.policies()
+        console.print(
+            f"[bold]merge | 合并:[/bold] [green]+{len(diff.added)}[/green] added  "
+            f"[cyan]~{len(diff.pinned_kept)}[/cyan] pinned-kept  "
+            f"[red]-{len(diff.obsolete)}[/red] obsolete  → {args.state}"
+        )
+        for m in diff.added:
+            console.print(f"  [green]+ {m}[/green]")
+        for m in diff.obsolete:
+            console.print(f"  [red]- {m} (obsolete)[/red]")
+
     table = Table(title="Alert policies | 告警策略（阈值为建议，待人审）", show_lines=True)
     table.add_column("Metric | 指标", style="bold")
     table.add_column("Condition | 触发条件")
@@ -327,6 +381,90 @@ def cmd_deploy_alerts(args: argparse.Namespace) -> int:
         console.print(
             f"[dim]routed to contact point | 路由到联络点: {args.contact_point}[/dim]"
         )
+
+    # EN: reconcile/prune obsolete sentinel-managed rules (dry-run by default).
+    # ZH: 对账/清理废弃的 sentinel 规则（默认 dry-run）。
+    pruned = 0
+    if getattr(args, "prune", False):
+        current_ids = {p.metric_id for p in policies}
+        try:
+            managed = client.list_sentinel_rules()
+        except GrafanaError as e:
+            console.print(f"[red]prune list error | 列举失败:[/red] {e}")
+            managed = []
+        stale = [r for r in managed if r.get("metric") and r["metric"] not in current_ids]
+        if not stale:
+            console.print("[dim]prune: nothing obsolete | 无废弃规则[/dim]")
+        elif not args.prune_apply:
+            console.print(
+                f"[yellow]prune DRY-RUN — would delete {len(stale)} obsolete rule(s); "
+                f"re-run with --prune-apply to delete | 模拟：将删 {len(stale)} 条，"
+                f"加 --prune-apply 才真删[/yellow]"
+            )
+            for r in stale:
+                console.print(f"  [red]- {r['title']}[/red]  ({r['metric']})")
+        else:
+            for r in stale:
+                try:
+                    client.delete_alert_rule(r["uid"])
+                    pruned += 1
+                    console.print(f"  [red]deleted[/red] {r['title']}")
+                except GrafanaError as e:
+                    console.print(f"[red]delete failed:[/red] {r['title']} -> {e}")
+
+    # EN: audit this deploy in the episodic ledger. | ZH: 将本次部署记入情景账本。
+    try:
+        from sentinel.memory.episodic import EpisodicMemory
+        from sentinel.paths import episodic_db_path
+        led = EpisodicMemory(episodic_db_path(repo))
+        led.record_deployment(base_url, args.contact_point, len(created), len(skipped), pruned)
+        led.close()
+    except Exception:
+        pass
+    return 0
+
+
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """EN: Approve/reject a metric so future `discover --memory` runs learn from
+        it (rejected metrics are suppressed next time). | ZH: 批/拒某指标，让后续
+        `discover --memory` 从中学习（被拒指标下次抑制）。"""
+    repo = Path(args.repo_path)
+    if not repo.exists():
+        console.print(f"[red]repo not found | 仓库不存在:[/red] {repo}")
+        return 1
+    from sentinel.memory.manager import MemoryManager
+    memory = MemoryManager(repo, privacy=args.privacy, enable_vector=False)
+
+    if args.list:
+        stats = memory.episodic.stats()
+        verdicts = memory.episodic.latest_verdicts()
+        table = Table(title="Feedback memory | 反馈记忆", show_lines=False)
+        table.add_column("Metric ID | 指标", style="bold")
+        table.add_column("Verdict | 裁决")
+        for mid, v in sorted(verdicts.items()):
+            color = "green" if v == "approve" else "red"
+            table.add_row(mid, f"[{color}]{v}[/{color}]")
+        console.print(table)
+        console.print(
+            f"[dim]runs: {stats['runs']}   approved: {stats['approved']}   "
+            f"rejected: {stats['rejected']}[/dim]"
+        )
+        memory.close()
+        return 0
+
+    if not args.metric_id or not (args.approve or args.reject):
+        console.print(
+            "[red]need <metric_id> and --approve/--reject | "
+            "需指定 <指标id> 与 --approve/--reject[/red]"
+        )
+        memory.close()
+        return 1
+
+    verdict = "approve" if args.approve else "reject"
+    memory.record_feedback(args.metric_id, verdict, args.reason)
+    color = "green" if verdict == "approve" else "yellow"
+    console.print(f"[{color}]recorded {verdict} | 已记录 {verdict}:[/{color}] {args.metric_id}")
+    memory.close()
     return 0
 
 
@@ -348,6 +486,9 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--lang", default="en", choices=["en", "zh"],
                    help="prompt/report language | 提示词/报告语言")
     d.add_argument("--no-cache", action="store_true", help="disable scan cache | 关闭扫描缓存")
+    d.add_argument("--memory", action="store_true",
+                   help="persistent memory: incremental index + learn from feedback "
+                        "| 持久记忆：增量索引+从反馈学习")
     d.set_defaults(func=cmd_discover)
 
     i = sub.add_parser("instrument", help="generate instrumentation for missing metrics | 为缺失指标生成埋点")
@@ -377,6 +518,10 @@ def build_parser() -> argparse.ArgumentParser:
     al.add_argument("repo_path", help="path to the repository | 仓库路径")
     al.add_argument("--emit-prometheus", metavar="FILE",
                     help="write a Prometheus alerting_rules.yml | 写出 Prometheus 告警规则文件")
+    al.add_argument("--state", metavar="FILE",
+                    help="persist + merge policies (keep pinned thresholds) | 持久化+合并策略（保留人工阈值）")
+    al.add_argument("--pin", metavar="METRIC_ID",
+                    help="pin a metric's thresholds in --state so regen won't overwrite | 在 --state 里固定某指标阈值")
     al.set_defaults(func=cmd_alerts)
 
     dp = sub.add_parser("deploy-alerts",
@@ -388,7 +533,24 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Grafana base URL (else GRAFANA_URL env) | Grafana 地址（否则读 GRAFANA_URL）")
     dp.add_argument("--folder", default="Sentinel",
                     help="Grafana folder for the rules | 规则所在的 Grafana 文件夹")
+    dp.add_argument("--prune", action="store_true",
+                    help="reconcile: find obsolete sentinel rules (dry-run) | 对账：找废弃规则（模拟）")
+    dp.add_argument("--prune-apply", action="store_true",
+                    help="actually delete obsolete rules (with --prune) | 真删废弃规则（配 --prune）")
     dp.set_defaults(func=cmd_deploy_alerts)
+
+    fb = sub.add_parser("feedback",
+                        help="approve/reject a metric so future runs learn | 批/拒指标，让后续运行学习")
+    fb.add_argument("repo_path", help="path to the repository | 仓库路径")
+    fb.add_argument("metric_id", nargs="?", help="metric id, e.g. app.cold_start | 指标 id")
+    grp = fb.add_mutually_exclusive_group()
+    grp.add_argument("--approve", action="store_true", help="keep this metric | 保留该指标")
+    grp.add_argument("--reject", action="store_true", help="suppress it next time | 下次抑制它")
+    fb.add_argument("--reason", default="", help="optional note | 可选备注")
+    fb.add_argument("--list", action="store_true", help="show current verdicts + stats | 显示当前裁决+统计")
+    fb.add_argument("--privacy", default="air-gapped", choices=[m.value for m in PrivacyMode],
+                    help="privacy tier (embedding not used here) | 隐私档")
+    fb.set_defaults(func=cmd_feedback)
     return parser
 
 
