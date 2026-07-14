@@ -42,7 +42,12 @@ _TOOLS: Dict[str, dict] = {}
 _TEMPLATES: List[dict] = []          # {prefix, uriTemplate, name, description, func}
 _STATIC_RES: Dict[str, dict] = {}    # uri -> {name, description, func}
 
-_TYPES = {str: "string", bool: "boolean", int: "integer", float: "number"}
+# EN: map both real types and their names (PEP 563 makes annotations strings).
+# ZH: 同时映射真实类型与其名字（PEP 563 让注解变成字符串）。
+_TYPES = {
+    str: "string", bool: "boolean", int: "integer", float: "number",
+    "str": "string", "bool": "boolean", "int": "integer", "float": "number",
+}
 
 
 def tool(fn: Callable) -> Callable:
