@@ -26,6 +26,11 @@ from sentinel.adapters.scanners.cache import ScanCache
 from sentinel.adapters.scanners.python_scanner import PythonScanner
 from sentinel.adapters.backends.kusto import KustoBackend
 from sentinel.adapters.backends.prometheus import PrometheusBackend, to_prometheus_yaml
+from sentinel.adapters.backends.grafana import (
+    GrafanaAlertingClient,
+    GrafanaError,
+    build_grafana_rules,
+)
 from sentinel.engines.apply import Applier, ApplyError
 from sentinel.engines.alerting import AlertingDesigner
 from sentinel.engines.discovery import DiscoveryEngine
@@ -252,6 +257,79 @@ def cmd_alerts(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_deploy_alerts(args: argparse.Namespace) -> int:
+    """EN: L3 — push Grafana-managed alert rules straight to Grafana via its
+        Provisioning API, wired to an existing contact point. No manual UI clicks.
+    ZH: L3 —— 通过 Grafana Provisioning API 直接把 Grafana-managed 告警规则推上去，
+        并接到已有联络点。无需手点 UI。"""
+    repo = Path(args.repo_path)
+    if not repo.exists():
+        console.print(f"[red]repo not found | 仓库不存在:[/red] {repo}")
+        return 1
+
+    # EN: load creds from repo/.env (kept out of git), then env. | ZH: 从 repo/.env 读凭据。
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(repo / ".env")
+    except ImportError:
+        pass
+    import os
+    base_url = args.grafana_url or os.getenv("GRAFANA_URL", "")
+    token = os.getenv("GRAFANA_TOKEN", "")
+    if not base_url or not token:
+        console.print(
+            "[red]missing GRAFANA_URL / GRAFANA_TOKEN | 缺少 GRAFANA_URL / GRAFANA_TOKEN[/red]\n"
+            "set them in the repo's .env (token is a secret) | 在仓库 .env 里设置（token 是密钥）"
+        )
+        return 1
+
+    catalog = DiscoveryEngine(scanners=[PythonScanner(cache=None)]).run(repo)
+    policies = AlertingDesigner().design(catalog)
+    if not policies:
+        console.print("[yellow]no metrics to alert on | 无指标可告警[/yellow]")
+        return 0
+
+    client = GrafanaAlertingClient(base_url, token)
+    try:
+        if not client.contact_point_exists(args.contact_point):
+            console.print(
+                f"[red]contact point not found | 联络点不存在:[/red] {args.contact_point}\n"
+                "create it in Grafana first | 请先在 Grafana 里创建它"
+            )
+            return 1
+        prom_uid = client.prometheus_datasource_uid()
+        folder_uid = client.ensure_folder(args.folder)
+        existing = client.existing_rule_titles()
+    except GrafanaError as e:
+        console.print(f"[red]Grafana API error | Grafana API 错误:[/red] {e}")
+        return 1
+
+    created: list[str] = []
+    skipped: list[str] = []
+    for p in policies:
+        for rule in build_grafana_rules(p, prom_uid, folder_uid, args.contact_point):
+            title = rule["title"]
+            if title in existing:
+                skipped.append(title)
+                continue
+            try:
+                client.create_alert_rule(rule)
+                created.append(title)
+            except GrafanaError as e:
+                console.print(f"[red]failed:[/red] {title} -> {e}")
+    console.print(
+        f"[green]deployed {len(created)} rule(s) | 已部署 {len(created)} 条规则[/green]"
+        f"  ·  skipped {len(skipped)} existing | 跳过 {len(skipped)} 条已存在"
+    )
+    for t in created:
+        console.print(f"  [green]+[/green] {t}")
+    if created:
+        console.print(
+            f"[dim]routed to contact point | 路由到联络点: {args.contact_point}[/dim]"
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sentinel",
@@ -300,6 +378,17 @@ def build_parser() -> argparse.ArgumentParser:
     al.add_argument("--emit-prometheus", metavar="FILE",
                     help="write a Prometheus alerting_rules.yml | 写出 Prometheus 告警规则文件")
     al.set_defaults(func=cmd_alerts)
+
+    dp = sub.add_parser("deploy-alerts",
+                        help="push alert rules to Grafana via API | 通过 API 把告警规则推到 Grafana")
+    dp.add_argument("repo_path", help="path to the repository | 仓库路径")
+    dp.add_argument("--contact-point", required=True,
+                    help="existing Grafana contact point name | 已有的 Grafana 联络点名")
+    dp.add_argument("--grafana-url", default="",
+                    help="Grafana base URL (else GRAFANA_URL env) | Grafana 地址（否则读 GRAFANA_URL）")
+    dp.add_argument("--folder", default="Sentinel",
+                    help="Grafana folder for the rules | 规则所在的 Grafana 文件夹")
+    dp.set_defaults(func=cmd_deploy_alerts)
     return parser
 
 

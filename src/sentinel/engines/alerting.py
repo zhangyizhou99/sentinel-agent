@@ -31,20 +31,38 @@ class AlertingDesigner:
     def design(self, catalog: MetricsCatalog) -> list[AlertPolicy]:
         out: list[AlertPolicy] = []
         seen: set[str] = set()
+        # EN: find the "request total" metric once — its _count is the error-rate
+        #     denominator. Prefer request-duration (RED.Duration) over cold_start.
+        # ZH: 先找一次“请求总数”指标 —— 它的 _count 作错误率分母。优先请求时延
+        #     （RED.Duration），排除冷启动。
+        total_id, total_unit = self._find_request_total(catalog)
         for m in catalog.metrics:
             if m.id in seen:
                 continue
             seen.add(m.id)
+            is_err = m.signal == Signal.errors
             out.append(
                 AlertPolicy(
                     metric_id=m.id,
+                    unit=m.unit,
                     method=ThresholdMethod.static,
                     window=self.window,
                     rules=self._rules_for(m.id, m.signal),
                     routing=self.routing,
+                    total_metric_id=total_id if is_err else None,
+                    total_metric_unit=total_unit if is_err else "",
                 )
             )
         return out
+
+    @staticmethod
+    def _find_request_total(catalog: MetricsCatalog) -> tuple[str | None, str]:
+        """EN: The metric whose _count = total requests (error-rate denominator).
+        ZH: 其 _count = 总请求数的指标（错误率分母）。"""
+        for m in catalog.metrics:
+            if m.signal == Signal.latency and not m.id.startswith("app.cold_start"):
+                return m.id, m.unit
+        return None, ""
 
     # -- per-signal threshold templates | 按信号的阈值模板 -----------------
 
