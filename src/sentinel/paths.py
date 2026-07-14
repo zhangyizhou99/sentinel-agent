@@ -38,3 +38,15 @@ def scan_cache_path(repo: str | Path) -> Path:
 
 def augment_cache_path(repo: str | Path) -> Path:
     return repo_cache_dir(repo) / "augment-cache.json"
+
+
+def vector_index_path(repo: str | Path, provider: str) -> Path:
+    """EN: Per-provider vector index (dims differ per embedding tier).
+    ZH: 按 provider 分文件的向量索引（不同嵌入档维度不同）。"""
+    return repo_cache_dir(repo) / f"vindex-{provider}.json"
+
+
+def episodic_db_path(repo: str | Path) -> Path:
+    """EN: SQLite file holding cross-run history + user feedback for this repo.
+    ZH: 存该仓库跨运行历史 + 用户反馈的 SQLite 文件。"""
+    return repo_cache_dir(repo) / "episodic.db"

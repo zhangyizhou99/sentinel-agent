@@ -2,12 +2,12 @@
 
 EN: A zero-dependency, air-gapped retrieval index. It answers "how relevant is
     each document to a query" using classic TF-IDF + cosine similarity. This is
-    the fallback tier from Chapter 8 (dashscope -> local -> TF-IDF), and the
-    foundation of our Retrieval-Augmented Discovery: rank code units so the LLM
-    only sees the top-K most observability-relevant ones.
+    the offline fallback tier of the embedding ladder (cloud -> local -> TF-IDF),
+    and the foundation of our Retrieval-Augmented Discovery: rank code units so
+    the LLM only sees the top-K most observability-relevant ones.
 ZH: 一个零依赖、可离线的检索索引。用经典 TF-IDF + 余弦相似度回答“每个文档与查询
-    有多相关”。这是第八章的兜底档（百炼→本地→TF-IDF），也是我们“检索增强发现”的
-    地基：给代码单元排序，让 LLM 只看 top-K 个最该监控的。
+    有多相关”。这是嵌入阶梯的离线兜底档（云→本地→TF-IDF），也是我们“检索增强
+    发现”的地基：给代码单元排序，让 LLM 只看 top-K 个最该监控的。
 
 Knowledge points | 知识点:
 - TF  (term frequency)      | 词频：词在“本文档”出现的次数，越多越重要。

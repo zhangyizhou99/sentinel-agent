@@ -3,11 +3,11 @@
 EN: Gate ② of "don't repeat work": caches the LLM augmentation result keyed by a
     signature of the candidate code units (each unit's content hash). If the set
     of units to augment is unchanged since last run, we reuse the cached result
-    and make ZERO LLM calls. This is the Chapter-8 memory principle ("unchanged →
-    reuse, don't recompute") applied to the expensive LLM step.
+    and make ZERO LLM calls. It applies the "unchanged → reuse, don't recompute"
+    principle to the most expensive step in the pipeline.
 ZH: “别重复干活”的第②道闸门：按候选代码单元的签名（每个单元的内容哈希）缓存 LLM
-    增强结果。若要增强的单元集合与上次一致，就复用缓存、**零次 LLM 调用**。这是第八
-    章记忆思想（“没变就复用，别重算”）用在最贵的 LLM 步骤上。
+    增强结果。若要增强的单元集合与上次一致，就复用缓存、**零次 LLM 调用**。把
+    “没变就复用、别重算”用在流水线里最贵的一步上。
 """
 from __future__ import annotations
 

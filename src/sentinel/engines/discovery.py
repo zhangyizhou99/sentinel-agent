@@ -49,8 +49,8 @@ class DiscoveryEngine:
         self.scanners: list[CodeScanner] = scanners or [PythonScanner()]
         self.llm = llm
         self.lang = lang
-        # EN: retriever bounds LLM input to top-K relevant units (Chapter-8 RAG).
-        # ZH: 检索器把 LLM 输入限定在 top-K 相关单元（第八章 RAG）。
+        # EN: retriever bounds LLM input to the top-K relevant units (RAG).
+        # ZH: 检索器把 LLM 输入限定在 top-K 相关单元（RAG）。
         self.retriever = retriever or ObservabilityRetriever()
         self.retrieval_top_k = retrieval_top_k
 

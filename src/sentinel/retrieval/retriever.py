@@ -1,16 +1,18 @@
 """Observability retriever. | 可观测性检索器。
 
-EN: Retrieval-Augmented Discovery, Chapter-8 style. It ranks every function by
-    how relevant it is to "things worth monitoring", so that at scale the LLM only
-    sees the top-K high-value units instead of the whole (5000-file) repo. This is
-    the fix for "LLM can't scan a huge project": retrieve, then augment top-K.
-ZH: 第八章式的“检索增强发现”。它按“与值得监控的东西有多相关”给每个函数排序，
-    这样大仓库下 LLM 只看 top-K 个高价值单元，而不是整个（5000 文件）仓库。这就是
-    “LLM 扫不动大工程”的解法：先检索，再只增强 top-K。
+EN: Retrieval-Augmented Discovery. It ranks every function by how relevant it is
+    to "things worth monitoring", so that at scale the LLM only sees the top-K
+    high-value units instead of the whole (5000-file) repo. This is the fix for
+    "LLM can't scan a huge project": retrieve, then augment top-K.
+ZH: “检索增强发现”。它按“与值得监控的东西有多相关”给每个函数排序，这样大仓库下
+    LLM 只看 top-K 个高价值单元，而不是整个（5000 文件）仓库。这就是“LLM 扫不动
+    大工程”的解法：先检索，再只增强 top-K。
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+from typing import Optional
 
 from sentinel.retrieval.code_units import CodeUnit, extract_code_units
 from sentinel.retrieval.tfidf import TfidfIndex
@@ -26,11 +28,24 @@ OBSERVABILITY_QUERY = (
 )
 
 
-class ObservabilityRetriever:
-    """EN: Rank code units by observability relevance. | ZH: 按可观测性相关度给代码单元排序。"""
+def _hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()
 
-    def __init__(self, query: str = OBSERVABILITY_QUERY):
+
+class ObservabilityRetriever:
+    """EN: Rank code units by observability relevance. | ZH: 按可观测性相关度给代码单元排序。
+
+    EN: Two backends: an in-memory TF-IDF pass (default, zero-setup) or a
+        persistent incremental vector store + embedding provider (for large repos
+        and cross-run reuse). Pass `provider` + `store` to enable the latter.
+    ZH: 两种后端：内存 TF-IDF（默认、零配置），或持久化增量向量库 + 嵌入 provider
+        （面向大仓库与跨运行复用）。传入 `provider` + `store` 即启用后者。"""
+
+    def __init__(self, query: str = OBSERVABILITY_QUERY,
+                 provider: Optional[object] = None, store: Optional[object] = None):
         self.query = query
+        self.provider = provider
+        self.store = store
 
     def rank(self, root: str | Path, top_k: int = 20) -> list[tuple[CodeUnit, float]]:
         """EN: Return the top_k (CodeUnit, score) most worth monitoring.
@@ -38,11 +53,26 @@ class ObservabilityRetriever:
         units = extract_code_units(root)
         if not units:
             return []
-        # EN: fit the TF-IDF index on the whole corpus of functions.
-        # ZH: 用全部函数语料拟合 TF-IDF 索引。
-        index = TfidfIndex().fit([(u.unit_id, u.text) for u in units])
         by_id = {u.unit_id: u for u in units}
-        # EN: retrieve the units most similar to the observability query.
-        # ZH: 检索与可观测性查询最相似的单元。
+
+        # EN: persistent path — incremental index + embedding query.
+        # ZH: 持久化路径 —— 增量索引 + 嵌入查询。
+        if self.provider is not None and self.store is not None:
+            records = [
+                (u.unit_id, _hash(u.text), u.text,
+                 {"file": u.file, "symbol": u.symbol, "line": u.line})
+                for u in units
+            ]
+            self.store.upsert(records, self.provider)
+            if hasattr(self.store, "save"):
+                self.store.save()
+            q_vec = self.provider.embed_query(self.query)
+            ranked = self.store.query(q_vec, top_k=top_k)
+            return [(by_id[uid], score) for uid, score in ranked
+                    if uid in by_id and score > 0]
+
+        # EN: default path — one-shot in-memory TF-IDF. | ZH: 默认路径 —— 一次性内存 TF-IDF。
+        index = TfidfIndex().fit([(u.unit_id, u.text) for u in units])
         ranked = index.query(self.query, top_k=top_k)
         return [(by_id[uid], score) for uid, score in ranked if score > 0]
+
