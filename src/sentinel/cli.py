@@ -31,6 +31,7 @@ from sentinel.adapters.backends.grafana import (
     GrafanaError,
     build_grafana_rules,
 )
+from sentinel.adapters.backends.grafana_dashboard import build_dashboard
 from sentinel.engines.apply import Applier, ApplyError
 from sentinel.engines.alerting import AlertingDesigner
 from sentinel.engines.discovery import DiscoveryEngine
@@ -497,6 +498,64 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """EN: Generate a Grafana dashboard from the catalog — push it to Grafana or
+        write the JSON to a file. | ZH: 从清单生成 Grafana 仪表盘 —— 推给 Grafana 或
+        写成 JSON 文件。"""
+    repo = Path(args.repo_path)
+    if not repo.exists():
+        console.print(f"[red]repo not found | 仓库不存在:[/red] {repo}")
+        return 1
+    catalog = DiscoveryEngine(scanners=[PythonScanner(cache=None)]).run(repo)
+    if not catalog.metrics:
+        console.print("[yellow]no metrics | 无指标[/yellow]")
+        return 0
+
+    if args.deploy:
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(repo / ".env")
+        except ImportError:
+            pass
+        import os
+        base_url = args.grafana_url or os.getenv("GRAFANA_URL", "")
+        token = os.getenv("GRAFANA_TOKEN", "")
+        if not base_url or not token:
+            console.print(
+                "[red]missing GRAFANA_URL / GRAFANA_TOKEN | 缺少 GRAFANA_URL / GRAFANA_TOKEN[/red]"
+            )
+            return 1
+        client = GrafanaAlertingClient(base_url, token)
+        try:
+            prom_uid = client.prometheus_datasource_uid()
+            folder_uid = client.ensure_folder(args.folder)
+            dashboard = build_dashboard(catalog, prom_uid)
+            resp = client.create_dashboard(dashboard, folder_uid)
+        except GrafanaError as e:
+            console.print(f"[red]Grafana API error | Grafana API 错误:[/red] {e}")
+            return 1
+        url = resp.get("url", "")
+        console.print(
+            f"[green]dashboard deployed | 仪表盘已部署:[/green] {base_url.rstrip('/')}{url}"
+        )
+        return 0
+
+    # EN: file export (offline). | ZH: 文件导出（离线）。
+    dashboard = build_dashboard(catalog, args.datasource_uid)
+    out = Path(args.emit) if args.emit else repo / ".sentinel" / "dashboard.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps({"dashboard": dashboard, "overwrite": True},
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    n_panels = sum(1 for p in dashboard["panels"] if p["type"] == "timeseries")
+    console.print(
+        f"[green]wrote dashboard ({n_panels} panels) | 已写入仪表盘（{n_panels} 面板）:[/green] {out}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sentinel",
@@ -589,6 +648,21 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--backend", default="prometheus", choices=["prometheus", "kusto"],
                     help="query backend for the emitted queries | 导出查询用的后端")
     ex.set_defaults(func=cmd_export)
+
+    db = sub.add_parser("dashboard",
+                        help="generate a Grafana dashboard (deploy or file) | 生成 Grafana 仪表盘（部署或文件）")
+    db.add_argument("repo_path", help="path to the repository | 仓库路径")
+    db.add_argument("--deploy", action="store_true",
+                    help="push to Grafana via API | 经 API 推给 Grafana")
+    db.add_argument("--emit", default="",
+                    help="write dashboard JSON to file (default <repo>/.sentinel/dashboard.json)")
+    db.add_argument("--grafana-url", default="",
+                    help="Grafana base URL (else GRAFANA_URL env) | Grafana 地址")
+    db.add_argument("--folder", default="Sentinel",
+                    help="Grafana folder | Grafana 文件夹")
+    db.add_argument("--datasource-uid", default="prometheus",
+                    help="prometheus datasource uid for file export | 文件导出用的数据源 uid")
+    db.set_defaults(func=cmd_dashboard)
     return parser
 
 

@@ -249,6 +249,32 @@ def run_deploy_alerts(repo: str, contact_point: str) -> str:
             f"{lines}")
 
 
+def run_deploy_dashboard(repo: str) -> str:
+    """EN: Build a Grafana dashboard from the catalog and push it (upsert by uid).
+    ZH: 从清单构建 Grafana 仪表盘并推送（按 uid 幂等）。"""
+    if not repo or not Path(repo).exists():
+        return f"❌ **repo not found | 仓库不存在:** `{repo}`"
+    base_url, token = _grafana_creds(repo)
+    if not base_url or not token:
+        return "❌ 缺 **GRAFANA_URL / GRAFANA_TOKEN**（放仓库 `.env`） | missing in .env"
+    from sentinel.adapters.backends.grafana import GrafanaAlertingClient, GrafanaError
+    from sentinel.adapters.backends.grafana_dashboard import build_dashboard
+    cat = _static_catalog(repo)
+    if not cat.metrics:
+        return "⚠️ 无指标 | no metrics"
+    client = GrafanaAlertingClient(base_url, token)
+    try:
+        prom_uid = client.prometheus_datasource_uid()
+        folder_uid = client.ensure_folder("Sentinel")
+        dashboard = build_dashboard(cat, prom_uid)
+        resp = client.create_dashboard(dashboard, folder_uid)
+    except GrafanaError as e:
+        return f"❌ Grafana API 错误 | error: {e}"
+    n = sum(1 for p in dashboard["panels"] if p["type"] == "timeseries")
+    url = resp.get("url", "")
+    return f"✅ **仪表盘已部署（{n} 面板）** → {base_url.rstrip('/')}{url}"
+
+
 def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Sentinel", theme=gr.themes.Soft()) as demo:
         gr.Markdown(
@@ -326,6 +352,11 @@ def build_ui() -> gr.Blocks:
                                  variant="secondary")
             prom_yaml = gr.Code(label="Prometheus alerting_rules.yml", language="yaml")
 
+            gr.Markdown("### 📊 Dashboard (L3) | 一键生成仪表盘")
+            btn_dashboard = gr.Button("📊 Deploy dashboard to Grafana | 部署仪表盘",
+                                      variant="stop")
+            dashboard_status = gr.Markdown()
+
         btn_discover.click(run_discover, [repo, provider, privacy], [table, summary])
         btn_instrument.click(run_instrument, [repo, provider, privacy], [code])
         btn_apply.click(run_apply, [repo, provider, privacy, branch], [diff, apply_note])
@@ -335,6 +366,7 @@ def build_ui() -> gr.Blocks:
         btn_deploy.click(run_deploy_alerts, [repo, contact_point], [deploy_status])
         btn_load_cp.click(load_contact_points, [repo], [contact_point, deploy_status])
         btn_emit.click(run_emit_prometheus, [repo], [prom_yaml])
+        btn_dashboard.click(run_deploy_dashboard, [repo], [dashboard_status])
     return demo
 
 

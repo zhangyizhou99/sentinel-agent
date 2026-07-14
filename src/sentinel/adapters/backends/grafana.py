@@ -152,6 +152,16 @@ class GrafanaAlertingClient:
         self._request("DELETE", f"/api/v1/provisioning/alert-rules/{uid}",
                       extra_headers={"X-Disable-Provenance": "true"})
 
+    def create_dashboard(self, dashboard: dict, folder_uid: str = "") -> dict:
+        """EN: Create/update a dashboard (upsert by its uid). Returns the API
+            response (contains uid + url). | ZH: 创建/更新仪表盘（按 uid 幂等 upsert）。
+            返回 API 响应（含 uid + url）。"""
+        body: dict = {"dashboard": dashboard, "overwrite": True}
+        if folder_uid:
+            body["folderUid"] = folder_uid
+        resp = self._request("POST", "/api/dashboards/db", body)
+        return resp if isinstance(resp, dict) else {}
+
 
 # -- policy -> Grafana rule JSON | 策略 -> Grafana 规则 JSON -----------------
 
